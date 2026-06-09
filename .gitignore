@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# uv
+.python-version
+
+# Secrets
+.env
+.env.*
+*.key
+*.pem
+*.p12
+
+# Video artefacts
+*.ts
+*.m3u8
+*.jpg
+*.jpeg
+
+# Testing / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.ruff_cache/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/

@@ -1,0 +1,41 @@
+[Unit]
+Description=GTI Router - edge video capture, HLS segmentation and S3 upload
+Documentation=https://github.com/gti/gti-router
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Type=notify: the Router emits READY=1 once init (12 steps) completes and a
+# WATCHDOG=1 heartbeat every 15 s from health/watchdog.py (Story 3.5).
+Type=notify
+ExecStart=/opt/gti-router/.venv/bin/python -m main
+WorkingDirectory=/opt/gti-router
+
+# Secrets are injected as environment variables (NFR9) — never in YAML.
+# EnvironmentFile=/etc/gti-router/router.env
+
+# ── Watchdog (Story 3.5) ─────────────────────────────────────────────────────
+# Heartbeat interval is 15 s = WatchdogSec/2 (standard safety margin). If the
+# event loop hangs the heartbeat stops and systemd restarts the service.
+WatchdogSec=30
+
+# ── Restart policy ────────────────────────────────────────────────────────────
+Restart=on-failure
+RestartSec=5
+# Avoid restart loops: at most 5 starts per 60 s window, else enter failed state.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+# ── Resource limits (tune per SKU; Base = RPi4, Pro = RPi5) ───────────────────
+# MemoryMax=512M        # Base SKU
+# MemoryMax=1G          # Pro SKU
+# CPUQuota=200%
+OOMPolicy=kill
+
+# ── Hardening ─────────────────────────────────────────────────────────────────
+NoNewPrivileges=true
+ProtectSystem=full
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
