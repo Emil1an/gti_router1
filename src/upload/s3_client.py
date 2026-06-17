@@ -39,6 +39,7 @@ _MULTIPART_CHUNK_BYTES: int = 5 * 1024 * 1024        # 5 MB per multipart part
 
 _CONTENT_TYPE_TS = "video/mp2t"
 _CONTENT_TYPE_M3U8 = "application/vnd.apple.mpegurl"
+_CONTENT_TYPE_JPEG = "image/jpeg"
 
 # botocore error codes that indicate a permanent failure (must not be retried)
 _PERMANENT_ERROR_CODES: frozenset[str] = frozenset(
@@ -187,6 +188,43 @@ class S3Uploader:
         await self._upload(playlist_path, key, _CONTENT_TYPE_M3U8, size)
         return key
 
+    async def upload_snapshot(
+        self,
+        camera_id: str,
+        snapshot_path: Path,
+        filename: str = "last_frame.jpg",
+        metadata: dict[str, str] | None = None,
+    ) -> str:
+        """Upload a last-frame JPEG (Story 6.3).
+
+        ``metadata`` is attached as S3 object metadata — used to carry the
+        no-detection contract (``source=router`` …, Story 6.4) so the consumer
+        knows the image is raw (no detection).
+
+        Returns:
+            The S3 key of the uploaded snapshot.
+        """
+        if self._client is None:
+            raise S3UploadError("S3Uploader has not been started — call start() first")
+
+        key = self._make_key(camera_id, filename)
+        try:
+            size = snapshot_path.stat().st_size
+        except OSError as exc:
+            raise S3PermanentError(
+                f"Cannot stat snapshot file '{snapshot_path}': {exc}"
+            ) from exc
+
+        await self._upload(snapshot_path, key, _CONTENT_TYPE_JPEG, size, metadata=metadata)
+        self._logger.info(
+            "Snapshot uploaded", extra={"camera_id": camera_id, "key": key}
+        )
+        return key
+
+    def object_url(self, key: str) -> str:
+        """Return the HTTPS S3 URL for an object key (TLS, NFR10)."""
+        return f"https://{self._bucket}.s3.{self._region}.amazonaws.com/{key}"
+
     # ── Private helpers ────────────────────────────────────────────────────────
 
     def _make_key(self, camera_id: str, filename: str) -> str:
@@ -204,13 +242,14 @@ class S3Uploader:
         key: str,
         content_type: str,
         size: int,
+        metadata: dict[str, str] | None = None,
     ) -> None:
         """Dispatch to put_object or multipart based on file size."""
         try:
             if size > _MULTIPART_THRESHOLD_BYTES:
-                await self._upload_multipart(path, key, content_type)
+                await self._upload_multipart(path, key, content_type, metadata)
             else:
-                await self._upload_put(path, key, content_type)
+                await self._upload_put(path, key, content_type, metadata)
         except (S3TransientError, S3PermanentError):
             raise  # already classified
         except botocore.exceptions.ClientError as exc:
@@ -229,29 +268,39 @@ class S3Uploader:
                 f"Cannot read local file '{path}': {exc}"
             ) from exc
 
-    async def _upload_put(self, path: Path, key: str, content_type: str) -> None:
+    async def _upload_put(
+        self, path: Path, key: str, content_type: str,
+        metadata: dict[str, str] | None = None,
+    ) -> None:
         """Upload a small file (≤5 MB) in a single ``put_object`` call."""
         data: bytes = await asyncio.to_thread(path.read_bytes)
-        await self._client.put_object(
-            Bucket=self._bucket,
-            Key=key,
-            Body=data,
-            ContentType=content_type,
-        )
+        kwargs: dict[str, Any] = {
+            "Bucket": self._bucket,
+            "Key": key,
+            "Body": data,
+            "ContentType": content_type,
+        }
+        if metadata:
+            kwargs["Metadata"] = {k: str(v) for k, v in metadata.items()}
+        await self._client.put_object(**kwargs)
 
     async def _upload_multipart(
-        self, path: Path, key: str, content_type: str
+        self, path: Path, key: str, content_type: str,
+        metadata: dict[str, str] | None = None,
     ) -> None:
         """Upload a large file (>5 MB) using S3 multipart upload.
 
         Aborts the multipart upload if any part fails, so no dangling
         incomplete uploads are left in S3.
         """
-        resp = await self._client.create_multipart_upload(
-            Bucket=self._bucket,
-            Key=key,
-            ContentType=content_type,
-        )
+        create_kwargs: dict[str, Any] = {
+            "Bucket": self._bucket,
+            "Key": key,
+            "ContentType": content_type,
+        }
+        if metadata:
+            create_kwargs["Metadata"] = {k: str(v) for k, v in metadata.items()}
+        resp = await self._client.create_multipart_upload(**create_kwargs)
         upload_id: str = resp["UploadId"]
 
         parts: list[dict[str, Any]] = []

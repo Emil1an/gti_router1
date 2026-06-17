@@ -37,8 +37,9 @@ import asyncio
 import logging
 import signal
 
+from camera.ptz_service import PTZService
+from camera.sources import create_source
 from camera.sources.base import VideoSource
-from camera.sources.rtsp_source import RTSPSource
 from config.loader import get_config
 from health.degraded import log_degraded_mode_status
 from health.monitor import SystemMonitor
@@ -47,9 +48,37 @@ from health.reporter import HealthReporter
 from health.state import AppState
 from health.supabase_client import SupabaseClient
 from health.watchdog import Watchdog
+from licensing import enforce_camera_limit
+from location.gps import GpsReader
+from location.orientation import OrientationPublisher
+from pipeline.snapshot import SnapshotService
 from upload.service import UploadService
-from utils.errors import CameraSetupError, ConfigError, PipelineError, RouterError
+from utils.errors import (
+    CameraLimitError,
+    CameraSetupError,
+    ConfigError,
+    PipelineError,
+    RouterError,
+    VideoSourceError,
+)
 from utils.logging import get_logger, setup_logging
+
+
+def _ensure_platform_package() -> None:
+    """Extend the stdlib ``platform`` module into a package so ``platform.board``
+    (Story 5.5) is importable, without replacing stdlib platform (psutil-safe).
+
+    Idempotent; mirrors the bootstrap in ``tests/conftest.py`` for production.
+    """
+    import os
+    import platform as _stdlib_platform
+
+    pkg = os.path.join(os.path.dirname(os.path.abspath(__file__)), "platform")
+    if pkg not in getattr(_stdlib_platform, "__path__", []):
+        _stdlib_platform.__path__ = [
+            *getattr(_stdlib_platform, "__path__", []),
+            pkg,
+        ]
 
 # Exit codes (Story 1.5)
 EXIT_OK = 0
@@ -70,8 +99,13 @@ class RouterApp:
         self._supabase_client: SupabaseClient | None = None
         self._registration: DeviceRegistration | None = None
         self._monitor: SystemMonitor | None = None
+        self._board = None
         self._upload_service: UploadService | None = None
         self._reporter: HealthReporter | None = None
+        self._gps: GpsReader | None = None
+        self._orientation: OrientationPublisher | None = None
+        self._snapshot: SnapshotService | None = None
+        self._ptz_service: PTZService | None = None
         self._watchdog: Watchdog | None = None
 
     # ── Initialisation (12 steps) ───────────────────────────────────────────────
@@ -118,33 +152,58 @@ class RouterApp:
         )
         await self._reporter.start()
 
-        # 10. systemd watchdog (3.5)
+        # 9b. Location + last-frame services (Epic 6) — all best-effort/contained.
+        #     GPS is Pro-only (inert otherwise); orientation/snapshot are degraded-
+        #     tolerant; none of them aborts the Router on failure.
+        try:
+            self._gps = GpsReader(self._board, self._state, self._supabase_client)
+            await self._gps.start()
+            self._orientation = OrientationPublisher(self._supabase_client)
+            await self._orientation.start()
+            self._snapshot = SnapshotService(self._supabase_client)
+            await self._snapshot.start()
+        except Exception as exc:  # noqa: BLE001 — Epic 6 services never abort startup
+            self._logger.error("Location/snapshot services failed to start (contained): %s", exc)
+
+        # 10. PTZ subsystem (Epic 4) — best-effort, never aborts the Router.
+        #     Activation is conditional on PTZ support + Supabase registration;
+        #     a PTZ failure here is contained (capture/upload/health keep running).
+        self._ptz_service = PTZService(self._supabase_client, self._state)
+        try:
+            await self._ptz_service.start()
+        except Exception as exc:  # noqa: BLE001 — fault isolation (AC#5)
+            self._logger.error("PTZ subsystem failed to start (contained): %s", exc)
+
+        # 11. systemd watchdog (3.5)
         self._watchdog = Watchdog()
         await self._watchdog.start()
 
-        # 11. Degraded-mode / PTZ status (3.6)
+        # 12. Degraded-mode / PTZ status (3.6) + READY=1 (single emission point)
         log_degraded_mode_status(self._state, self._logger)
-
-        # 12. READY=1 (single emission point, coordinated with the watchdog)
         self._watchdog.notify_ready()
         self._logger.info("GTI Router initialised — READY")
 
     def _build_sources(self) -> list[VideoSource]:
-        """Construct one VideoSource per configured camera (fail-fast)."""
+        """Detect the board, enforce the camera limit, and build one VideoSource
+        per configured camera via the factory (fail-fast → exit 2).
+
+        Each camera becomes its own VideoSource; the UploadService then gives
+        each a dedicated HLSPipeline + supervisor task (hard isolation, Story 5.4).
+        """
         assert self._cfg is not None
+
+        _ensure_platform_package()
+        from platform.board import detect_board  # noqa: PLC0415 — lazy (bootstrap)
+
+        self._board = detect_board()
+        self._logger.info("Hardware board detected", extra={"board": self._board.value})
+
+        # Physical hardware ceiling (NFR12) — fail-fast if exceeded (Story 5.6).
+        enforce_camera_limit(self._cfg.cameras, self._board)
+
         sources: list[VideoSource] = []
         for cam in self._cfg.cameras:
-            if cam.input_type == "rtsp_ip":
-                if not cam.rtsp_url:
-                    raise CameraSetupError(f"camera {cam.camera_id}: missing rtsp_url")
-                sources.append(RTSPSource(camera_id=cam.camera_id, rtsp_url=cam.rtsp_url))
-            else:
-                raise CameraSetupError(
-                    f"camera {cam.camera_id}: input_type '{cam.input_type}' "
-                    "not supported yet"
-                )
-        if not sources:
-            raise CameraSetupError("no cameras configured")
+            sources.append(create_source(cam, board=self._board))
         return sources
 
     # ── Shutdown (6 steps) ──────────────────────────────────────────────────────
@@ -158,23 +217,31 @@ class RouterApp:
             self._watchdog.notify_stopping()
         await self._emit_final_report()
 
-        # 2. Stop the health reporter
+        # 2. Stop the PTZ + location/snapshot services (cloud-writing producers)
+        if self._ptz_service is not None:
+            await self._ptz_service.stop()
+        for svc in (self._snapshot, self._orientation, self._gps):
+            if svc is not None:
+                try:
+                    await svc.stop()
+                except Exception as exc:  # noqa: BLE001 — contained
+                    self._logger.error("Error stopping Epic 6 service: %s", exc)
+
+        # 3. Stop the health reporter
         if self._reporter is not None:
             await self._reporter.stop()
 
-        # 3. Stop the upload subsystem (drain in-flight uploads, persist SQLite)
+        # 4. Stop the upload subsystem (drain in-flight uploads, persist SQLite)
         if self._upload_service is not None:
             await self._upload_service.stop(drain_timeout_s=timeout)
 
-        # 4. Stop the system monitor
+        # 5. Stop the system monitor
         if self._monitor is not None:
             await self._monitor.stop()
 
-        # 5. Stop device registration
+        # 6. Stop device registration + watchdog
         if self._registration is not None:
             await self._registration.stop()
-
-        # 6. Stop the watchdog
         if self._watchdog is not None:
             await self._watchdog.stop()
 
@@ -214,7 +281,7 @@ class RouterApp:
         except ConfigError as exc:
             self._logger.error("Configuration error — aborting: %s", exc)
             return EXIT_CONFIG
-        except CameraSetupError as exc:
+        except (CameraSetupError, CameraLimitError, VideoSourceError) as exc:
             self._logger.error("Camera setup error — aborting: %s", exc)
             return EXIT_CAMERA
         except PipelineError as exc:

@@ -442,7 +442,10 @@ class HLSPipeline:
             "ffmpeg",
             "-y",  # overwrite outputs without asking
             *self._source.ffmpeg_input_args,
-            "-c", "copy",         # passthrough — quality over quantity (FR12)
+            # Codec args come from the source: passthrough (-c copy) for RTSP,
+            # or the EncoderSelector's encode args for a capture card. The
+            # pipeline stays agnostic to the source type (Story 5.1 AC#5).
+            *self._source.ffmpeg_codec_args,
             "-f", "hls",
             "-hls_time", str(self._segment_duration),
             "-hls_segment_type", "mpegts",

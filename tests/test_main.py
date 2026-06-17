@@ -33,12 +33,13 @@ device: {serial_number: GTR-1, name: R, gateway_id: gw-1, firmware_version: "1.0
 upload: {shutdown_timeout_s: 5}
 """
 
-_CAPTURE_CARD_YAML = """\
+# 4 IP cameras exceed an RPi4's physical limit (2 IP + 1 capture) → exit 2.
+_OVER_LIMIT_YAML = """\
 cameras:
-  - camera_id: cam-cap
-    input_type: capture_card
-    device: /dev/video0
-    orientation: {azimuth: 0, tilt: 0, fov_h: 90, mount_height_m: 5}
+  - {camera_id: c1, input_type: rtsp_ip, rtsp_url: "rtsp://a:b@10.0.0.1:554/s", orientation: {azimuth: 0, tilt: 0, fov_h: 90, mount_height_m: 5}}
+  - {camera_id: c2, input_type: rtsp_ip, rtsp_url: "rtsp://a:b@10.0.0.2:554/s", orientation: {azimuth: 0, tilt: 0, fov_h: 90, mount_height_m: 5}}
+  - {camera_id: c3, input_type: rtsp_ip, rtsp_url: "rtsp://a:b@10.0.0.3:554/s", orientation: {azimuth: 0, tilt: 0, fov_h: 90, mount_height_m: 5}}
+  - {camera_id: c4, input_type: rtsp_ip, rtsp_url: "rtsp://a:b@10.0.0.4:554/s", orientation: {azimuth: 0, tilt: 0, fov_h: 90, mount_height_m: 5}}
 hls:
   segment_duration: 4
 aws: {bucket: b, region: us-east-1, access_key_id: k, secret_access_key: s}
@@ -80,6 +81,10 @@ def _patch_components(stack: ExitStack, order: list[str]) -> dict[str, MagicMock
     mon = _component(order, "monitor")
     svc = _component(order, "upload")
     rep = _component(order, "reporter")
+    gps = _component(order, "gps")
+    orient = _component(order, "orientation")
+    snap = _component(order, "snapshot")
+    ptz = _component(order, "ptz")
     wd = _component(order, "watchdog")
 
     async def _final_report(*_a, **_k):
@@ -94,8 +99,16 @@ def _patch_components(stack: ExitStack, order: list[str]) -> dict[str, MagicMock
     stack.enter_context(patch.object(main_mod, "SystemMonitor", MagicMock(return_value=mon)))
     stack.enter_context(patch.object(main_mod, "UploadService", MagicMock(return_value=svc)))
     stack.enter_context(patch.object(main_mod, "HealthReporter", MagicMock(return_value=rep)))
+    stack.enter_context(patch.object(main_mod, "GpsReader", MagicMock(return_value=gps)))
+    stack.enter_context(patch.object(main_mod, "OrientationPublisher", MagicMock(return_value=orient)))
+    stack.enter_context(patch.object(main_mod, "SnapshotService", MagicMock(return_value=snap)))
+    stack.enter_context(patch.object(main_mod, "PTZService", MagicMock(return_value=ptz)))
     stack.enter_context(patch.object(main_mod, "Watchdog", MagicMock(return_value=wd)))
-    return {"registration": reg, "monitor": mon, "upload": svc, "reporter": rep, "watchdog": wd}
+    return {
+        "registration": reg, "monitor": mon, "upload": svc, "reporter": rep,
+        "gps": gps, "orientation": orient, "snapshot": snap,
+        "ptz": ptz, "watchdog": wd,
+    }
 
 
 # ── Init order (12 steps) ─────────────────────────────────────────────────────────
@@ -113,6 +126,10 @@ class TestStartup:
             "start:monitor",
             "start:upload",
             "start:reporter",
+            "start:gps",
+            "start:orientation",
+            "start:snapshot",
+            "start:ptz",
             "start:watchdog",
             "READY=1",
         ]
@@ -143,6 +160,10 @@ class TestShutdown:
         assert order == [
             "STOPPING=1",
             "final_report",
+            "stop:ptz",
+            "stop:snapshot",
+            "stop:orientation",
+            "stop:gps",
             "stop:reporter",
             "stop:upload",
             "stop:monitor",
@@ -194,16 +215,21 @@ class TestExitCodes:
         assert code == EXIT_CONFIG
 
     async def test_camera_error_returns_two(self, tmp_path: Path) -> None:
+        from platform.board import Board
+
         order: list[str] = []
-        cap_cfg = tmp_path / "cap.yaml"
-        cap_cfg.write_text(_CAPTURE_CARD_YAML, encoding="utf-8")
+        over_cfg = tmp_path / "over.yaml"
+        over_cfg.write_text(_OVER_LIMIT_YAML, encoding="utf-8")
         with ExitStack() as stack:
             _patch_components(stack, order)
-            os.environ["ROUTER_CONFIG"] = str(cap_cfg)
+            # Force an RPi4 board: 4 IP cameras exceed its 2-IP limit → exit 2.
+            stack.enter_context(
+                patch("platform.board.detect_board", return_value=Board.RPI4)
+            )
+            os.environ["ROUTER_CONFIG"] = str(over_cfg)
             reset_config()
             app = RouterApp()
             code = await app.run()
-        # capture_card is not yet supported → CameraSetupError → exit 2.
         assert code == EXIT_CAMERA
 
     async def test_pipeline_error_returns_three(self) -> None:

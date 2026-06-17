@@ -101,3 +101,30 @@ class VideoSource(ABC):
         The pipeline prepends these to its FFmpeg command without needing to
         know whether the source is a network camera or a capture card.
         """
+
+    @property
+    def produces_detection(self) -> bool:
+        """Whether this source carries detection results.
+
+        Always ``False`` for the Router: it produces only **raw** video /
+        last-frame **without detection** — all inference (fire/smoke) is the
+        Gateway's responsibility (ecosystem invariant). The DJI control feed
+        (Story 5.3) is a ``capture_card`` source like any other and is likewise
+        "no detection". Epic 6 (Story 6.4) formalises this origin marking on the
+        last-frame/snapshot; this flag prepares that contract.
+        """
+        return False
+
+    @property
+    def ffmpeg_codec_args(self) -> list[str]:
+        """FFmpeg codec/output args applied after the input args.
+
+        Defaults to **passthrough** (``-c copy``) — no transcoding, the
+        quality-over-quantity rule for RTSP sources (FR12).  A
+        :class:`~camera.sources.capture_card_source.CaptureCardSource` overrides
+        this with the encoder args chosen by
+        :class:`~camera.encoder.EncoderSelector` (Story 5.2), since V4L2 capture
+        has no passthrough.  The pipeline applies these without knowing the
+        source type, keeping the video-source boundary intact (Story 5.1 AC#5).
+        """
+        return ["-c", "copy"]

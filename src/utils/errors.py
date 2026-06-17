@@ -66,6 +66,32 @@ class CameraSetupError(RTSPError):
     """A camera could not be set up from configuration (fail-fast, exit 2)."""
 
 
+# ── Video source abstraction (Epic 5) ────────────────────────────────────────────
+
+class VideoSourceError(RouterError):
+    """Base for video-source abstraction errors (RTSP / capture card)."""
+
+
+class CaptureCardError(VideoSourceError):
+    """A V4L2 capture device is missing, inaccessible, or returned bad data."""
+
+
+# ── Encoder selection (Epic 5) ───────────────────────────────────────────────────
+
+class EncoderError(RouterError):
+    """Encoder configuration/selection failed."""
+
+
+class UnsupportedEncoderError(EncoderError):
+    """A forbidden/unsupported encoder was requested (e.g. HEVC in software)."""
+
+
+# ── Licensing / hardware limits (Epic 5) ─────────────────────────────────────────
+
+class CameraLimitError(RouterError):
+    """The configured cameras exceed the board's physical limit (fail-fast)."""
+
+
 # ── Pipeline ────────────────────────────────────────────────────────────────────
 
 class PipelineError(RouterError):
@@ -164,7 +190,25 @@ class PTZCommandError(PTZError):
     """An ONVIF PTZ command was rejected or returned a fault. Not retryable."""
 
 
-# ── GPS ─────────────────────────────────────────────────────────────────────────
+class PTZValidationError(PTZError):
+    """A PTZ command failed security validation (stale/expired/foreign/rate). """
+
+
+# ── GPS / Location (Epic 6) ──────────────────────────────────────────────────────
 
 class GPSError(RouterError):
     """GPS module read failed."""
+
+
+# Story 6.1 uses the ``GpsError`` spelling — keep an alias for both.
+GpsError = GPSError
+
+
+class OrientationError(RouterError):
+    """Camera orientation is invalid or could not be persisted (Story 6.2)."""
+
+
+# ── Snapshot / last-frame (Epic 6) ───────────────────────────────────────────────
+
+class SnapshotError(RouterError):
+    """A last-frame JPEG snapshot could not be generated or uploaded (Story 6.3)."""

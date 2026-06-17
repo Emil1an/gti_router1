@@ -32,8 +32,10 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Coroutine
+from datetime import UTC, datetime
 from typing import Any
 
+from camera.validator import PTZCommandValidator
 from config.loader import get_config
 from health.state import AppState
 from health.supabase_client import SupabaseClient
@@ -67,11 +69,13 @@ class CommandReceiver:
         camera_ids: list[str] | None = None,
         app_state: AppState | None = None,
         realtime: Any | None = None,
+        validator: PTZCommandValidator | None = None,
     ) -> None:
         cfg = get_config()
         self._client = client
         self._handler = handler
         self._app_state = app_state
+        self._validator = validator
         if camera_ids is not None:
             self._camera_ids = list(camera_ids)
         elif app_state is not None:
@@ -89,10 +93,12 @@ class CommandReceiver:
         self._seen_ids: set[Any] = set()
         self._inflight: dict[str, asyncio.Task[None]] = {}
         self._inflight_type: dict[str, str] = {}
+        self._readonly_tasks: set[asyncio.Task[None]] = set()
         self._logger = get_logger(__name__)
 
         # Metrics
         self._ptz_commands_received = 0
+        self._ptz_commands_rejected = 0
         self._ptz_realtime_connected = False
         self._ptz_polling_active = False
 
@@ -101,6 +107,10 @@ class CommandReceiver:
     @property
     def ptz_commands_received(self) -> int:
         return self._ptz_commands_received
+
+    @property
+    def ptz_commands_rejected(self) -> int:
+        return self._ptz_commands_rejected
 
     @property
     def ptz_realtime_connected(self) -> bool:
@@ -143,10 +153,11 @@ class CommandReceiver:
                     pass
         self._poll_task = self._realtime_task = None
 
-        for task in list(self._inflight.values()):
+        for task in list(self._inflight.values()) + list(self._readonly_tasks):
             if not task.done():
                 task.cancel()
         self._inflight.clear()
+        self._readonly_tasks.clear()
 
         if self._realtime is not None:
             try:
@@ -258,6 +269,24 @@ class CommandReceiver:
         if row.get("status") != "pending":
             return  # only pending
 
+        # Security validation BEFORE the claim (Story 4.4). A rejected command is
+        # closed as 'failed' with the reason and never reaches 'processing'.
+        if self._validator is not None:
+            result = self._validator.validate(row)
+            if not result.ok:
+                self._seen_ids.add(command_id)
+                self._ptz_commands_rejected += 1
+                self._logger.warning(
+                    "PTZ command rejected — marking failed",
+                    extra={
+                        "camera_id": camera_id,
+                        "command_id": command_id,
+                        "reason": result.reason,
+                    },
+                )
+                await self._reject(command_id, result.reason or "rejected")
+                return
+
         claimed = await self._claim(command_id)
         # Mark seen regardless: a failed/empty claim means someone else took it.
         self._seen_ids.add(command_id)
@@ -278,6 +307,27 @@ class CommandReceiver:
             },
         )
         self._dispatch(claimed)
+
+    async def _reject(self, command_id: Any, reason: str) -> None:
+        """Close a rejected command as ``failed`` with its reason (conditional on
+        still being ``pending`` so a concurrently-claimed row is never clobbered).
+        """
+        now = datetime.now(tz=UTC).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+
+        async def _do() -> list[dict[str, Any]]:
+            return await self._client.update(
+                _TABLE,
+                {"id": f"eq.{command_id}", "status": "eq.pending"},
+                {"status": "failed", "error_message": reason, "executed_at": now},
+            )
+
+        wrapped = with_retry(
+            max_retries=self._realtime_retries, retryable=(SupabaseTransientError,)
+        )(_do)
+        try:
+            await wrapped()
+        except SupabaseError as exc:
+            self._logger.warning("Could not mark rejected command failed: %s", exc)
 
     async def _claim(self, command_id: Any) -> dict[str, Any] | None:
         """Atomic claim: pending → processing. Returns the row, or ``None``."""
@@ -307,6 +357,15 @@ class CommandReceiver:
         """
         camera_id = str(command.get("camera_id"))
         command_type = str(command.get("command_type"))
+
+        # ptz_get_position is read-only (Story 4.6): it must NOT cancel an active
+        # move nor be tracked as the camera's in-flight command. Run it
+        # independently so it can execute even during an ongoing movement.
+        if command_type == "ptz_get_position":
+            task = asyncio.create_task(self._handler(command))
+            self._readonly_tasks.add(task)
+            task.add_done_callback(self._readonly_tasks.discard)
+            return
 
         prev = self._inflight.get(camera_id)
         prev_type = self._inflight_type.get(camera_id)

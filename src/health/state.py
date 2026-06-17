@@ -35,6 +35,9 @@ class CameraState:
     streaming: bool = False
     last_segment_at: str | None = None  # ISO-8601 UTC with Z
     error: str | None = None
+    # PTZ sub-block (Story 4.5) — populated by the PTZ subsystem when active.
+    # Shape: {"supported", "capabilities", "position", "realtime_connected"}.
+    ptz: dict[str, object] | None = None
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -44,6 +47,7 @@ class CameraState:
             "streaming": self.streaming,
             "last_segment_at": self.last_segment_at,
             "error": self.error,
+            "ptz": self.ptz,
         }
 
 

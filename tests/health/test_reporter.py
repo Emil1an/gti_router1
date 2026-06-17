@@ -124,10 +124,12 @@ class TestComposeReport:
         per_camera = rep._compose_report()["per_camera"]
         assert len(per_camera) == 1
         cam = per_camera[0]
-        assert set(cam.keys()) == {
+        # The fixed health contract keys must all be present (a `ptz` sub-block
+        # is added additively by the PTZ subsystem in Story 4.5).
+        assert {
             "camera_id", "input_type", "connected", "streaming",
             "last_segment_at", "error",
-        }
+        } <= set(cam.keys())
         assert cam["camera_id"] == "cam-test"
         assert cam["input_type"] == "rtsp_ip"
 

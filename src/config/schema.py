@@ -171,6 +171,34 @@ class PtzConfig(BaseModel):
     update_max_retries: Annotated[int, Field(ge=0, le=20)] = 3
     realtime_reconnect_max_retries: Annotated[int, Field(ge=0, le=100)] = 10
 
+    # Security (Story 4.4) — anti-replay + rate-limit
+    command_max_age_s: Annotated[int, Field(ge=1, le=300)] = 30
+    rate_limit_per_min: Annotated[int, Field(ge=1, le=600)] = 60
+
+    # Lifecycle (Story 4.5) — re-check activation when registration recovers
+    activation_retry_s: Annotated[int, Field(ge=1, le=600)] = 30
+
+
+# ── GPS / location (Epic 6) ──────────────────────────────────────────────────────
+
+class GpsConfig(BaseModel):
+    """GPS reader settings (Story 6.1). GPS is Pro-only (gated by board)."""
+
+    enabled: bool = True            # further gated to RPi5/Pro by board detection
+    host: str = "127.0.0.1"         # gpsd host
+    port: Annotated[int, Field(ge=1, le=65535)] = 2947  # gpsd port
+    read_timeout_s: Annotated[int, Field(ge=1, le=120)] = 10
+    persist_interval_s: Annotated[int, Field(ge=5, le=3600)] = 60
+
+
+# ── Snapshot / last-frame (Epic 6) ───────────────────────────────────────────────
+
+class SnapshotConfig(BaseModel):
+    """Last-frame JPEG snapshot settings (Story 6.3, NFR13)."""
+
+    enabled: bool = True
+    interval_s: Annotated[int, Field(ge=1, le=3600)] = 10  # default 10 s (NFR13)
+
 
 # ── Local buffer / disk management ─────────────────────────────────────────────
 
@@ -262,6 +290,8 @@ class RouterConfig(BaseModel):
     buffer: BufferConfig = Field(default_factory=BufferConfig)
     recovery: RecoveryConfig = Field(default_factory=RecoveryConfig)
     ptz: PtzConfig = Field(default_factory=PtzConfig)
+    gps: GpsConfig = Field(default_factory=GpsConfig)
+    snapshot: SnapshotConfig = Field(default_factory=SnapshotConfig)
     supabase: SupabaseConfig
     device: DeviceConfig
     health: HealthConfig = Field(default_factory=HealthConfig)

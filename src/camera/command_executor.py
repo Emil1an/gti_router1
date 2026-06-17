@@ -81,8 +81,9 @@ class CommandExecutor:
         logger = get_logger(__name__, camera_id=camera_id)
         start = time.monotonic()
 
+        is_get_position = command_type == "ptz_get_position"
         method_name = _COMMAND_METHODS.get(command_type)
-        if method_name is None:
+        if method_name is None and not is_get_position:
             await self._finalize(
                 command, "failed",
                 f"unknown command_type '{command_type}'", start,
@@ -98,6 +99,12 @@ class CommandExecutor:
             return
 
         try:
+            # ptz_get_position (Story 4.6): read-only — no movement is ever issued.
+            if is_get_position:
+                position = await controller.get_position()
+                await self._finalize(command, "completed", None, start, position=position)
+                return
+
             method = getattr(controller, method_name)
             await method(**self._args_for(command_type, payload))
 
