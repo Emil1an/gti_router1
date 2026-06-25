@@ -11,6 +11,9 @@ dependencies = [
     "psutil",
     "pynmea2",
     "systemd-python",
+    # Local console (Epic 11) — in-process HTTP API on loopback.
+    "fastapi~=0.115",
+    "uvicorn~=0.30",
 ]
 
 [project.scripts]

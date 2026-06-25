@@ -139,13 +139,26 @@ class SnapshotService:
             pass
 
     async def snapshot_once(self, camera_id: str) -> str | None:
-        """Take, upload, and record one snapshot. Returns the S3 URL or ``None``."""
+        """Take, upload, and record one snapshot. Returns the S3 URL or ``None``.
+
+        The extracted JPEG is retained on disk as ``last_frame.jpg`` per camera
+        (Story 11.2) so the local console can serve it even after the cloud
+        upload has happened; only the most recent frame is kept (overwritten).
+        The S3 upload runs from a throwaway temp copy that is always cleaned up.
+        """
         jpeg_path = await self._extract_frame(camera_id)
         if jpeg_path is None:
             return None  # no segment available yet
 
+        # Upload from a temp copy so the retained last_frame.jpg is never removed.
+        upload_path = jpeg_path.with_name("last_frame.upload.jpg")
         try:
-            key = await self._upload_with_retry(camera_id, jpeg_path)
+            try:
+                upload_path.write_bytes(jpeg_path.read_bytes())
+            except OSError:
+                upload_path = jpeg_path  # fall back to uploading the retained file
+
+            key = await self._upload_with_retry(camera_id, upload_path)
             url = self._uploader.object_url(key)
             await self._update_camera(camera_id, url)
             self._snapshots_taken += 1
@@ -155,10 +168,11 @@ class SnapshotService:
             )
             return url
         finally:
-            try:
-                jpeg_path.unlink(missing_ok=True)
-            except OSError:
-                pass
+            if upload_path != jpeg_path:
+                try:
+                    upload_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     # ── Frame extraction ──────────────────────────────────────────────────────────
 

@@ -53,6 +53,7 @@ from location.gps import GpsReader
 from location.orientation import OrientationPublisher
 from pipeline.snapshot import SnapshotService
 from upload.service import UploadService
+from web.server import LocalConsoleServer
 from utils.errors import (
     CameraLimitError,
     CameraSetupError,
@@ -106,6 +107,7 @@ class RouterApp:
         self._orientation: OrientationPublisher | None = None
         self._snapshot: SnapshotService | None = None
         self._ptz_service: PTZService | None = None
+        self._console: LocalConsoleServer | None = None
         self._watchdog: Watchdog | None = None
 
     # ── Initialisation (12 steps) ───────────────────────────────────────────────
@@ -133,6 +135,17 @@ class RouterApp:
         # 6. System monitor (3.3)
         self._monitor = SystemMonitor()
         await self._monitor.start()
+
+        # 6b. Local console mini-API (Epic 11) — loopback, best-effort.
+        #     Reads AppState + SystemMonitor live; a failure here never aborts
+        #     the Router (capture/upload/health keep running).
+        self._console = LocalConsoleServer(
+            state=self._state, monitor=self._monitor, cfg=self._cfg
+        )
+        try:
+            await self._console.start()
+        except Exception as exc:  # noqa: BLE001 — console is non-essential
+            self._logger.error("Local console failed to start (contained): %s", exc)
 
         # 7. Build video sources from config (fail-fast → exit 2)
         sources = self._build_sources()
@@ -216,6 +229,13 @@ class RouterApp:
         if self._watchdog is not None:
             self._watchdog.notify_stopping()
         await self._emit_final_report()
+
+        # 1b. Stop the local console (loopback HTTP server) early.
+        if self._console is not None:
+            try:
+                await self._console.stop()
+            except Exception as exc:  # noqa: BLE001 — contained
+                self._logger.error("Error stopping local console: %s", exc)
 
         # 2. Stop the PTZ + location/snapshot services (cloud-writing producers)
         if self._ptz_service is not None:

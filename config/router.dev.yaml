@@ -1,0 +1,46 @@
+# router.dev.yaml — DEV ONLY (local console testing on a workstation).
+#
+# Dummy aws/supabase values so config validates without real credentials; the
+# console runner (scripts/run_console_dev.py) never connects to the cloud — it
+# only reads device/cameras/hls/console. Do NOT ship this to a Pi.
+
+cameras:
+  - camera_id: cam-front
+    input_type: rtsp_ip
+    rtsp_url: "rtsp://demo:demo@127.0.0.1:554/stream"
+    orientation: {azimuth: 45.0, tilt: -15.0, fov_h: 90.0, mount_height_m: 6.0}
+  - camera_id: cam-rear
+    input_type: rtsp_ip
+    rtsp_url: "rtsp://demo:demo@127.0.0.1:554/stream2"
+    orientation: {azimuth: 200.0, tilt: -10.0, fov_h: 80.0, mount_height_m: 4.0}
+
+hls:
+  segment_duration: 4
+  output_dir: "./.dev/hls"          # local; /hls mount is skipped if absent
+
+aws:
+  bucket: dev-bucket
+  region: us-east-1
+  access_key_id: DEV
+  secret_access_key: DEV
+
+supabase:
+  url: "https://dev.supabase.co"
+  service_role_key: "dev"
+
+device:
+  serial_number: "GTR-DEV-000001"
+  name: "Router de Desarrollo"
+  gateway_id: null
+  sku: base
+  firmware_version: "0.1.0-dev"
+  claim_token: "GTR-DEV-000001-claimdemo"
+
+console:
+  enabled: true
+  host: "127.0.0.1"
+  port: 8770
+  static_dir: "./.dev/console"      # override at runtime with the arg/env (see runner)
+
+licensing:
+  max_cameras: 4

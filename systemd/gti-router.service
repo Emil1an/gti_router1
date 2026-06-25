@@ -12,7 +12,16 @@ ExecStart=/opt/gti-router/.venv/bin/python -m main
 WorkingDirectory=/opt/gti-router
 
 # Secrets are injected as environment variables (NFR9) — never in YAML.
+# This file also carries ROUTER_CLAIM_TOKEN for the local-console QR (Story 11.4).
 # EnvironmentFile=/etc/gti-router/router.env
+
+# ── Local console (Epic 11) ──────────────────────────────────────────────────
+# The console is an in-process FastAPI server on 127.0.0.1:8770 (loopback-only).
+# It needs NO extra unit config: the port and the static-bundle directory come
+# from router.yaml (console.host / console.port / console.static_dir, default
+# /var/lib/gti-router/console). Deploy the Next.js out/ bundle there with
+# scripts/deploy-console.sh — StaticFiles re-reads on each request, so updating
+# the bundle needs no service restart.
 
 # ── Watchdog (Story 3.5) ─────────────────────────────────────────────────────
 # Heartbeat interval is 15 s = WatchdogSec/2 (standard safety margin). If the
@@ -36,6 +45,12 @@ OOMPolicy=kill
 NoNewPrivileges=true
 ProtectSystem=full
 PrivateTmp=true
+# Ensure /var/lib/gti-router exists and stays writable for HLS output, the
+# SQLite upload queue, retained last_frame.jpg and the console static bundle.
+# (ProtectSystem=full keeps /var writable; StateDirectory makes the tree explicit
+# and survives a future tightening to ProtectSystem=strict.)
+StateDirectory=gti-router
+ReadWritePaths=/var/lib/gti-router
 
 [Install]
 WantedBy=multi-user.target
