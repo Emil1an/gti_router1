@@ -68,6 +68,21 @@ device:
   name: "Router Norte Parcela 3"
   gateway_id: null                  # UUID of the linked Gateway (null = standalone)
   sku: base                         # "base" (RPi4) or "pro" (RPi5)
+  # claim_token: seeded by workshop provisioning; drawn as the QR the user scans
+  # at gtisatelites.com to claim the unit (Story 11.4). It is NOT a service
+  # secret. When omitted, the console falls back to serial_number for the QR.
+  # Uncomment to source it from the env file (recommended):
+  # claim_token: "${ROUTER_CLAIM_TOKEN}"
+
+# ── Local console (Epic 11) ───────────────────────────────────────────────────
+# In-process FastAPI mini-API + static touch-screen UI. Bound to loopback ONLY
+# (127.0.0.1) — never exposed on the LAN. Serves the exported Next.js bundle, so
+# no Node runtime is needed on the Pi.
+console:
+  enabled: true
+  host: "127.0.0.1"                 # loopback-only by contract (do not change)
+  port: 8770
+  static_dir: /var/lib/gti-router/console  # where the deploy script drops out/
 
 # ── Health reporting ──────────────────────────────────────────────────────────
 health:

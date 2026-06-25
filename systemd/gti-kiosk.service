@@ -1,0 +1,43 @@
+[Unit]
+Description=GTI Router — local console kiosk (Chromium via cage)
+Documentation=https://github.com/gti/gti-router
+# Start after the Router (and therefore the console API) is up. The kiosk script
+# still waits/retries for the API, so this is best-effort ordering, not a hard
+# dependency (the screen must come up even if the Router restarts).
+After=gti-router.service systemd-user-sessions.target
+Wants=gti-router.service
+# Only run when a GPU/DRM device exists (no-op on a headless boot).
+ConditionPathExists=/dev/dri/card0
+
+[Service]
+# cage is a single-application Wayland kiosk compositor; it owns the VT, draws
+# Chromium fullscreen and exits when it exits. No desktop environment needed.
+Type=simple
+
+# Run as an unprivileged kiosk user. PAMName=login opens a real login session so
+# logind grants a seat + sets XDG_RUNTIME_DIR (needed for the Wayland socket).
+User=kiosk
+Group=kiosk
+PAMName=login
+
+# Take VT1. Disable getty@tty1 so they do not fight for the console:
+#   sudo systemctl disable --now getty@tty1
+TTYPath=/dev/tty1
+StandardInput=tty
+StandardOutput=journal
+StandardError=journal
+UnsetEnvironment=TERM
+
+Environment=CONSOLE_HOST=127.0.0.1
+Environment=CONSOLE_PORT=8770
+# Hide the pointer until touched; cage hides the cursor when idle anyway.
+Environment=WLR_NO_HARDWARE_CURSORS=1
+
+ExecStart=/usr/bin/cage -d -- /opt/gti-router/scripts/kiosk/gti-kiosk.sh
+
+# If Chromium/cage dies, bring the screen straight back (covers AC#4).
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=graphical.target

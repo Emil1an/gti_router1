@@ -1,0 +1,34 @@
+#!/usr/sbin/nft -f
+#
+# gti-router-loopback.nft — Story 11.12 network hardening.
+#
+# The console mini-API already binds 127.0.0.1 only (config console.host,
+# enforced in src/web/server.py). This firewall is defense-in-depth: even if the
+# binding were ever changed, the console port can NEVER be reached from a real
+# network interface (Ethernet/WiFi).
+#
+# Install:
+#   sudo install -D -m 644 packaging/nftables/gti-router-loopback.nft \
+#        /etc/nftables.d/gti-router-loopback.nft
+#   # ensure /etc/nftables.conf includes the drop-in dir, then:
+#   #   include "/etc/nftables.d/*.nft"
+#   sudo systemctl enable --now nftables
+#   sudo nft -f /etc/nftables.d/gti-router-loopback.nft   # apply now
+#
+# This table is self-contained (own priority) and does not touch other rules:
+# loopback is accepted; the console port arriving on any other interface is
+# dropped. SSH and the rest of your traffic are unaffected.
+
+table inet gti_router_console {
+    chain input {
+        # Sit below the main filter so we only add a targeted drop.
+        type filter hook input priority filter + 10; policy accept;
+
+        # Loopback (the kiosk's Chromium → 127.0.0.1:8770) is always allowed.
+        iif "lo" accept
+
+        # Anything reaching the console port over a real NIC is rejected/dropped.
+        tcp dport 8770 drop
+        udp dport 8770 drop
+    }
+}

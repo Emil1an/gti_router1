@@ -244,6 +244,27 @@ class DeviceConfig(BaseModel):
     # Falls back to serial_number if empty.
     user_id: str = ""    # Supabase user UUID
     router_id: str = ""  # Supabase router UUID
+    # Claim token seeded by workshop provisioning (Story 11.4). Used by the local
+    # console to draw the QR the user scans at gtisatelites.com to claim the unit.
+    # Never a service secret — falls back to serial_number when absent.
+    claim_token: str | None = None
+
+
+# ── Local console (Epic 11) ──────────────────────────────────────────────────────
+
+class ConsoleConfig(BaseModel):
+    """In-process local console / mini-API settings (Story 11.1 / 11.10).
+
+    The console is a FastAPI app bound to loopback only (NOT exposed on the LAN)
+    that serves read-only device state and the static Next.js UI bundle.
+    """
+
+    enabled: bool = True
+    host: str = "127.0.0.1"  # loopback-only by contract (Story 11.1 AC#2)
+    port: Annotated[int, Field(ge=1, le=65535)] = 8770
+    # Directory holding the exported Next.js bundle (Story 11.10). Served at "/"
+    # when present; the API still works if it is missing (UI not built yet).
+    static_dir: str = "/var/lib/gti-router/console"
 
 
 # ── Health ─────────────────────────────────────────────────────────────────────
@@ -296,6 +317,7 @@ class RouterConfig(BaseModel):
     device: DeviceConfig
     health: HealthConfig = Field(default_factory=HealthConfig)
     licensing: LicensingConfig = Field(default_factory=LicensingConfig)
+    console: ConsoleConfig = Field(default_factory=ConsoleConfig)
 
     @model_validator(mode="after")
     def _validate_unique_camera_ids(self) -> "RouterConfig":
