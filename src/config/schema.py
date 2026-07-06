@@ -106,6 +106,10 @@ class AwsConfig(BaseModel):
     they must NEVER appear as plaintext in router.yaml (NFR9).
     """
 
+    # Set to false for local/offline testing (e.g. validating RTSP cameras
+    # without real cloud credentials): the capture pipeline and the local
+    # console run, but no S3 uploads are attempted — segments queue locally.
+    enabled: bool = True
     bucket: str
     region: str = "us-east-1"
     access_key_id: str      # expanded from ${AWS_ACCESS_KEY_ID}

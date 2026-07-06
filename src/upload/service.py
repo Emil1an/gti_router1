@@ -96,30 +96,70 @@ class UploadService:
                 )
             )
 
+        self._aws_enabled: bool = cfg.aws.enabled
+        self._cloud_started: bool = False
         self._buffer_task: asyncio.Task[None] | None = None
         self._running = False
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
     async def start(self) -> None:
-        """Start the subsystem: uploader → DB → queue worker → buffer → pipelines."""
+        """Start the subsystem, keeping capture alive even if the cloud fails.
+
+        Order matters: the DB is opened first (pipelines enqueue into it), then
+        the S3 upload path is brought up **best-effort**, then the capture
+        pipelines always start. If S3 is disabled (``aws.enabled=false``, test
+        mode) or its init fails (e.g. dummy/invalid credentials), we log a warning
+        and run capture-only — segments accumulate as ``pending`` in SQLite and
+        upload once valid credentials exist. This mirrors the degraded-mode
+        philosophy of the rest of the Router (registration/PTZ/snapshot).
+        """
         self._logger.info("UploadService starting", extra={"cameras": len(self._pipelines)})
 
-        await self._uploader.start()
-        if self._app_state is not None:
-            self._app_state.s3_connected = True
+        # DB must be open before any pipeline enqueues a segment.
         await self._db.open()          # service owns the shared DB
-        await self._queue.start()      # queue uses the shared DB (does not close it)
+
+        # Cloud upload path — best-effort, never blocks capture.
+        if not self._aws_enabled:
+            self._logger.warning(
+                "AWS S3 disabled by config (aws.enabled=false) — capture-only, "
+                "no uploads. Segments will queue locally in SQLite."
+            )
+            if self._app_state is not None:
+                self._app_state.s3_connected = False
+        else:
+            try:
+                await self._uploader.start()
+                await self._queue.start()  # uses the shared DB (does not close it)
+                self._cloud_started = True
+                if self._app_state is not None:
+                    self._app_state.s3_connected = True
+            except Exception as exc:  # noqa: BLE001 — cloud must never abort capture
+                self._logger.warning(
+                    "S3 upload subsystem failed to start (contained) — capture-only, "
+                    "segments will queue locally: %s",
+                    exc,
+                )
+                if self._app_state is not None:
+                    self._app_state.s3_connected = False
 
         self._running = True
-        self._buffer_task = asyncio.create_task(
-            self._buffer_loop(), name="buffer-enforcer"
-        )
 
+        # The buffer FIFO only recycles *uploaded* segments, so it is only useful
+        # when the cloud path is live.
+        if self._cloud_started:
+            self._buffer_task = asyncio.create_task(
+                self._buffer_loop(), name="buffer-enforcer"
+            )
+
+        # Capture pipelines ALWAYS start — this is the whole point of local test.
         for pipe in self._pipelines:
             await pipe.start()
 
-        self._logger.info("UploadService started")
+        self._logger.info(
+            "UploadService started",
+            extra={"cloud": self._cloud_started, "cameras": len(self._pipelines)},
+        )
 
     async def stop(self, drain_timeout_s: float | None = None) -> None:
         """Stop in the safe order: producers → drain uploads → uploader → DB.
@@ -149,8 +189,10 @@ class UploadService:
         self._buffer_task = None
 
         # 3. Drain in-flight uploads within the configured timeout, then close.
-        await self._queue.stop(drain_timeout_s=drain_timeout_s)  # shares DB → won't close it
-        await self._uploader.stop()
+        #    Only if the cloud path actually started (test/degraded mode skips it).
+        if self._cloud_started:
+            await self._queue.stop(drain_timeout_s=drain_timeout_s)  # shares DB → won't close it
+            await self._uploader.stop()
         await self._db.close()
 
         self._logger.info("UploadService stopped")
