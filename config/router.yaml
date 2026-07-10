@@ -1,9 +1,3 @@
-# router.dev.yaml — DEV ONLY (local console testing on a workstation).
-#
-# Dummy aws/supabase values so config validates without real credentials; the
-# console runner (scripts/run_console_dev.py) never connects to the cloud — it
-# only reads device/cameras/hls/console. Do NOT ship this to a Pi.
-
 cameras:
   - camera_id: cam-front
     input_type: rtsp_ip
@@ -16,7 +10,7 @@ cameras:
 
 hls:
   segment_duration: 4
-  output_dir: "./.dev/hls"          # local; /hls mount is skipped if absent
+  output_dir: "/app/data"
 
 aws:
   bucket: dev-bucket
@@ -38,9 +32,9 @@ device:
 
 console:
   enabled: true
-  host: "127.0.0.1"
-  port: 8770
-  static_dir: "./.dev/console"      # override at runtime with the arg/env (see runner)
+  host: "0.0.0.0"
+  port: 8000
+  static_dir: "/app/data"
 
 licensing:
   max_cameras: 4

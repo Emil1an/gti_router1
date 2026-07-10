@@ -23,7 +23,7 @@ from config.schema import CameraConfig
 from utils.errors import VideoSourceError
 
 if TYPE_CHECKING:  # only for typing; avoids importing the clashing platform pkg
-    from platform.board import Board
+    from hardware.board import Board
 
 __all__ = ["VideoSource", "RTSPSource", "CaptureCardSource", "create_source"]
 

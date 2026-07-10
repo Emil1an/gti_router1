@@ -65,22 +65,6 @@ from utils.errors import (
 from utils.logging import get_logger, setup_logging
 
 
-def _ensure_platform_package() -> None:
-    """Extend the stdlib ``platform`` module into a package so ``platform.board``
-    (Story 5.5) is importable, without replacing stdlib platform (psutil-safe).
-
-    Idempotent; mirrors the bootstrap in ``tests/conftest.py`` for production.
-    """
-    import os
-    import platform as _stdlib_platform
-
-    pkg = os.path.join(os.path.dirname(os.path.abspath(__file__)), "platform")
-    if pkg not in getattr(_stdlib_platform, "__path__", []):
-        _stdlib_platform.__path__ = [
-            *getattr(_stdlib_platform, "__path__", []),
-            pkg,
-        ]
-
 # Exit codes (Story 1.5)
 EXIT_OK = 0
 EXIT_CONFIG = 1
@@ -205,8 +189,7 @@ class RouterApp:
         """
         assert self._cfg is not None
 
-        _ensure_platform_package()
-        from platform.board import detect_board  # noqa: PLC0415 — lazy (bootstrap)
+        from hardware.board import detect_board  # noqa: PLC0415 — lazy (bootstrap)
 
         self._board = detect_board()
         self._logger.info("Hardware board detected", extra={"board": self._board.value})

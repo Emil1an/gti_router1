@@ -38,7 +38,7 @@ from utils.errors import UnsupportedEncoderError
 from utils.logging import get_logger
 
 if TYPE_CHECKING:  # only for type-checkers; never imported at runtime
-    from platform.board import Board
+    from hardware.board import Board
 
 _logger = get_logger(__name__)
 

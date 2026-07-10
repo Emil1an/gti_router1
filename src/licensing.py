@@ -38,7 +38,7 @@ from utils.logging import get_logger
 
 if TYPE_CHECKING:  # type-only; avoids importing the stdlib-clashing platform pkg
     from config.schema import CameraConfig
-    from platform.board import Board
+    from hardware.board import Board
 
 _logger = get_logger(__name__)
 
