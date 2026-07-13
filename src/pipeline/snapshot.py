@@ -28,6 +28,7 @@ from pathlib import Path
 from config.loader import get_config
 from health.supabase_client import SupabaseClient
 from upload.s3_client import S3Uploader
+from utils import frame_store
 from utils.contract import no_detection_contract
 from utils.errors import (
     S3TransientError,
@@ -68,6 +69,12 @@ class SnapshotService:
         self._output_base = Path(output_base or cfg.hls.output_dir)
         self._interval = interval_s if interval_s is not None else cfg.snapshot.interval_s
         self._enabled = cfg.snapshot.enabled
+
+        # Low-latency edge tuning (Story 6.3 / Gateway freshness).
+        self._ram_dir = Path(cfg.snapshot.ram_dir)
+        self._max_height = cfg.snapshot.max_height
+        self._jpeg_quality = cfg.snapshot.jpeg_quality
+        self._cache_control = cfg.snapshot.cache_control
 
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._running = False
@@ -141,54 +148,56 @@ class SnapshotService:
     async def snapshot_once(self, camera_id: str) -> str | None:
         """Take, upload, and record one snapshot. Returns the S3 URL or ``None``.
 
-        The extracted JPEG is retained on disk as ``last_frame.jpg`` per camera
-        (Story 11.2) so the local console can serve it even after the cloud
-        upload has happened; only the most recent frame is kept (overwritten).
-        The S3 upload runs from a throwaway temp copy that is always cleaned up.
+        Zero-Disk-Write low-latency path:
+        1. FFmpeg extracts + downscales + compresses the frame **into tmpfs**
+           (``/dev/shm``) — no MicroSD write at all in production. The frame stays
+           there (overwritten each cycle) and the local console reads it directly
+           from RAM via :func:`utils.frame_store.resolve_last_frame`.
+        2. The tmpfs JPEG is uploaded to a **stable S3 key** with ``Cache-Control``
+           over the kept-alive aioboto3 client (async, non-blocking).
+
+        When tmpfs is unavailable (non-Linux/dev) the frame lands in the on-disk
+        output dir instead — the console resolves either location transparently.
         """
-        jpeg_path = await self._extract_frame(camera_id)
-        if jpeg_path is None:
+        scratch = await self._extract_frame(camera_id)
+        if scratch is None:
             return None  # no segment available yet
 
-        # Upload from a temp copy so the retained last_frame.jpg is never removed.
-        upload_path = jpeg_path.with_name("last_frame.upload.jpg")
-        try:
-            try:
-                upload_path.write_bytes(jpeg_path.read_bytes())
-            except OSError:
-                upload_path = jpeg_path  # fall back to uploading the retained file
-
-            key = await self._upload_with_retry(camera_id, upload_path)
-            url = self._uploader.object_url(key)
-            await self._update_camera(camera_id, url)
-            self._snapshots_taken += 1
-            self._logger.info(
-                "Last-frame snapshot published",
-                extra={"camera_id": camera_id, "url": url},
-            )
-            return url
-        finally:
-            if upload_path != jpeg_path:
-                try:
-                    upload_path.unlink(missing_ok=True)
-                except OSError:
-                    pass
+        # Upload from tmpfs (stable key + Cache-Control, keep-alive client).
+        key = await self._upload_with_retry(camera_id, scratch)
+        url = self._uploader.object_url(key)
+        await self._update_camera(camera_id, url)
+        self._snapshots_taken += 1
+        self._logger.info(
+            "Last-frame snapshot published",
+            extra={"camera_id": camera_id, "url": url},
+        )
+        return url
 
     # ── Frame extraction ──────────────────────────────────────────────────────────
 
+    def _scratch_dir(self, camera_id: str) -> Path:
+        """Per-camera dir FFmpeg writes the JPEG into (tmpfs preferred).
+
+        Delegates to :func:`utils.frame_store.scratch_dir` so the console reader
+        resolves the exact same location.
+        """
+        return frame_store.scratch_dir(camera_id, self._output_base, self._ram_dir)
+
     def _build_extract_command(self, segment: Path, out: Path) -> list[str]:
-        """FFmpeg command to grab the last frame of a segment as a JPEG."""
+        """FFmpeg command: grab the last frame, downscale + compress to a JPEG."""
         return [
             "ffmpeg", "-y",
             "-sseof", "-1",           # seek ~1s before end → the last frame
             "-i", str(segment),
             "-frames:v", "1",
-            "-q:v", "2",              # high-quality JPEG
+            "-vf", f"scale=-2:{self._max_height}",  # downscale (even width kept)
+            "-q:v", str(self._jpeg_quality),        # compress (small file <50 KB)
             str(out),
         ]
 
     async def _extract_frame(self, camera_id: str) -> Path | None:
-        """Extract a JPEG from the camera's most recent buffered segment."""
+        """Extract a JPEG from the camera's most recent buffered segment (into RAM)."""
         cam_dir = self._output_base / camera_id
         if not cam_dir.exists():
             return None
@@ -196,7 +205,7 @@ class SnapshotService:
         if not segments:
             return None
         latest = segments[-1]
-        out = cam_dir / "last_frame.jpg"
+        out = self._scratch_dir(camera_id) / "last_frame.jpg"
 
         cmd = self._build_extract_command(latest, out)
         try:
@@ -228,7 +237,9 @@ class SnapshotService:
         """Upload the JPEG with the no-detection contract metadata (Story 6.4)."""
         async def _do() -> str:
             return await self._uploader.upload_snapshot(
-                camera_id, jpeg_path, metadata=no_detection_contract()
+                camera_id, jpeg_path,
+                metadata=no_detection_contract(),
+                cache_control=self._cache_control,
             )
 
         wrapped = with_retry(

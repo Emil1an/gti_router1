@@ -36,6 +36,7 @@ from pydantic import BaseModel
 from config.schema import RouterConfig
 from health.monitor import SystemMonitor
 from health.state import AppState
+from utils.frame_store import resolve_last_frame
 
 _LAST_FRAME_NAME = "last_frame.jpg"
 _PLAYLIST_NAME = "playlist.m3u8"
@@ -128,6 +129,7 @@ def create_app(
     )
 
     hls_root = Path(cfg.hls.output_dir)
+    ram_dir = Path(cfg.snapshot.ram_dir)  # tmpfs source for Zero-Disk-Write frames
     cameras_by_id = {c.camera_id: c for c in cfg.cameras}
 
     # ── Data endpoints ──────────────────────────────────────────────────────────
@@ -179,7 +181,9 @@ def create_app(
         out: list[CameraResponse] = []
         for cam_id, cam_cfg in cameras_by_id.items():
             rt = state.per_camera.get(cam_id)
-            last_frame = hls_root / cam_id / _LAST_FRAME_NAME
+            # tmpfs (RAM) preferred, on-disk fallback — same resolution the
+            # snapshot writer uses (Zero-Disk-Write in production).
+            last_frame = resolve_last_frame(cam_id, hls_root, ram_dir)
             out.append(
                 CameraResponse(
                     camera_id=cam_id,
@@ -192,7 +196,7 @@ def create_app(
                     ptz=rt.ptz if rt else None,
                     hls_url=f"/hls/{cam_id}/{_PLAYLIST_NAME}",
                     last_frame_url=f"/api/cameras/{cam_id}/{_LAST_FRAME_NAME}",
-                    has_last_frame=last_frame.exists(),
+                    has_last_frame=last_frame is not None,
                 )
             )
         return out
@@ -221,8 +225,9 @@ def create_app(
         # Validate against configured cameras → no arbitrary filesystem access.
         if camera_id not in cameras_by_id:
             raise HTTPException(status_code=404, detail="unknown camera")
-        frame = hls_root / camera_id / _LAST_FRAME_NAME
-        if not frame.is_file():
+        # Serve from tmpfs (RAM) if present, else the on-disk fallback.
+        frame = resolve_last_frame(camera_id, hls_root, ram_dir)
+        if frame is None:
             raise HTTPException(
                 status_code=404, detail="no frame captured yet for this camera"
             )

@@ -198,10 +198,27 @@ class GpsConfig(BaseModel):
 # ── Snapshot / last-frame (Epic 6) ───────────────────────────────────────────────
 
 class SnapshotConfig(BaseModel):
-    """Last-frame JPEG snapshot settings (Story 6.3, NFR13)."""
+    """Last-frame JPEG snapshot settings (Story 6.3, NFR13).
+
+    Low-latency edge tuning (Gateway freshness):
+    * ``ram_dir``: tmpfs path FFmpeg writes to, bypassing MicroSD I/O latency.
+    * ``max_height`` + ``jpeg_quality``: downscale + compress to a small JPEG
+      (~<50 KB) so both the S3 PUT and the Gateway GET are fast.
+    * ``cache_control``: header on the S3 object so the Gateway always reads the
+      freshest image without listing the bucket.
+    """
 
     enabled: bool = True
     interval_s: Annotated[int, Field(ge=1, le=3600)] = 10  # default 10 s (NFR13)
+
+    # In-RAM scratch dir (Linux tmpfs). Falls back to hls.output_dir if absent.
+    ram_dir: str = "/dev/shm/gti-router"
+    # Downscale target height in px (width auto, even). 480 ≈ 480p.
+    max_height: Annotated[int, Field(ge=90, le=2160)] = 480
+    # FFmpeg mjpeg quality: 2 (best/large) … 31 (worst/tiny). 7 ≈ small & sharp.
+    jpeg_quality: Annotated[int, Field(ge=2, le=31)] = 7
+    # Sent as the S3 object's Cache-Control header (freshness for the Gateway).
+    cache_control: str = "max-age=0, no-cache"
 
 
 # ── Local buffer / disk management ─────────────────────────────────────────────

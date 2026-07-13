@@ -27,6 +27,7 @@ from typing import Any
 
 import aioboto3
 import botocore.exceptions
+from botocore.config import Config as BotoConfig
 
 from config.loader import get_config
 from utils.errors import S3PermanentError, S3TransientError, S3UploadError
@@ -101,14 +102,28 @@ class S3Uploader:
     # ── Lifecycle ──────────────────────────────────────────────────────────────
 
     async def start(self) -> None:
-        """Open the aioboto3 S3 client.  Must be called before any upload."""
+        """Open the aioboto3 S3 client.  Must be called before any upload.
+
+        The client is opened **once** and reused for every upload, so the
+        underlying aiobotocore connection pool keeps HTTPS/TLS connections alive
+        (keep-alive) — no per-upload handshake latency. ``tcp_keepalive`` and a
+        bounded pool make repeated small snapshot PUTs cheap; short timeouts fail
+        fast instead of stalling the event loop.
+        """
         self._session = aioboto3.Session(
             aws_access_key_id=self._access_key_id,
             aws_secret_access_key=self._secret_access_key,
             region_name=self._region,
         )
-        # TLS is always on — aioboto3 defaults use_ssl=True (NFR10)
-        self._client_ctx = self._session.client("s3")
+        # TLS is always on — aioboto3 defaults use_ssl=True (NFR10).
+        boto_cfg = BotoConfig(
+            tcp_keepalive=True,          # reuse warm TCP/TLS connections
+            max_pool_connections=10,     # enough for multi-camera bursts
+            connect_timeout=3,
+            read_timeout=5,
+            retries={"max_attempts": 1, "mode": "standard"},  # UploadQueue retries
+        )
+        self._client_ctx = self._session.client("s3", config=boto_cfg)
         self._client = await self._client_ctx.__aenter__()
         self._logger.info(
             "S3Uploader started",
@@ -194,6 +209,7 @@ class S3Uploader:
         snapshot_path: Path,
         filename: str = "last_frame.jpg",
         metadata: dict[str, str] | None = None,
+        cache_control: str | None = None,
     ) -> str:
         """Upload a last-frame JPEG (Story 6.3).
 
@@ -215,7 +231,10 @@ class S3Uploader:
                 f"Cannot stat snapshot file '{snapshot_path}': {exc}"
             ) from exc
 
-        await self._upload(snapshot_path, key, _CONTENT_TYPE_JPEG, size, metadata=metadata)
+        await self._upload(
+            snapshot_path, key, _CONTENT_TYPE_JPEG, size,
+            metadata=metadata, cache_control=cache_control,
+        )
         self._logger.info(
             "Snapshot uploaded", extra={"camera_id": camera_id, "key": key}
         )
@@ -243,13 +262,14 @@ class S3Uploader:
         content_type: str,
         size: int,
         metadata: dict[str, str] | None = None,
+        cache_control: str | None = None,
     ) -> None:
         """Dispatch to put_object or multipart based on file size."""
         try:
             if size > _MULTIPART_THRESHOLD_BYTES:
                 await self._upload_multipart(path, key, content_type, metadata)
             else:
-                await self._upload_put(path, key, content_type, metadata)
+                await self._upload_put(path, key, content_type, metadata, cache_control)
         except (S3TransientError, S3PermanentError):
             raise  # already classified
         except botocore.exceptions.ClientError as exc:
@@ -271,6 +291,7 @@ class S3Uploader:
     async def _upload_put(
         self, path: Path, key: str, content_type: str,
         metadata: dict[str, str] | None = None,
+        cache_control: str | None = None,
     ) -> None:
         """Upload a small file (≤5 MB) in a single ``put_object`` call."""
         data: bytes = await asyncio.to_thread(path.read_bytes)
@@ -280,6 +301,8 @@ class S3Uploader:
             "Body": data,
             "ContentType": content_type,
         }
+        if cache_control:
+            kwargs["CacheControl"] = cache_control
         if metadata:
             kwargs["Metadata"] = {k: str(v) for k, v in metadata.items()}
         await self._client.put_object(**kwargs)
