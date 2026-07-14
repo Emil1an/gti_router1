@@ -64,6 +64,7 @@ def client(tmp_path: Path):
     app = create_app(state=state, monitor=monitor, cfg=cfg)
     with TestClient(app) as c:
         c._hls_dir = hls_dir  # type: ignore[attr-defined]
+        c._state = state  # type: ignore[attr-defined]
         yield c
 
     del os.environ["ROUTER_CONFIG"]
@@ -105,6 +106,22 @@ def test_qr_unregistered(client: TestClient) -> None:
     # No claim_token seeded → falls back to serial; not yet registered.
     assert body["claim_token"] == "GTR-TEST-001"
     assert body["status"] == "unregistered"
+
+
+def test_temperature(client: TestClient) -> None:
+    r = client.get("/api/temperature")
+    assert r.status_code == 200
+    body = r.json()
+    assert set(body) == {"current_celsius", "sampled_at", "history"}
+    assert isinstance(body["history"], list)
+
+
+def test_temperature_history_seeded(client: TestClient) -> None:
+    client._state.temperature_history.append(  # type: ignore[attr-defined]
+        {"celsius": 42.5, "at": "2026-07-13T00:00:00.000Z"}
+    )
+    body = client.get("/api/temperature").json()
+    assert body["history"][-1] == {"celsius": 42.5, "at": "2026-07-13T00:00:00.000Z"}
 
 
 def test_last_frame_404_then_200(client: TestClient) -> None:

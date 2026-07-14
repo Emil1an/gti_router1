@@ -98,6 +98,12 @@ class QrResponse(BaseModel):
     status: str
 
 
+class TemperatureResponse(BaseModel):
+    current_celsius: float | None = None
+    sampled_at: str | None = None
+    history: list[dict] = []
+
+
 # ── App factory ──────────────────────────────────────────────────────────────────
 
 def create_app(
@@ -174,6 +180,15 @@ def create_app(
                 "error_count": state.upload_error_count,
             },
             gps=state.gps,
+        )
+
+    @app.get("/api/temperature", response_model=TemperatureResponse)
+    async def get_temperature() -> TemperatureResponse:
+        snap = monitor.snapshot()
+        return TemperatureResponse(
+            current_celsius=snap.temperature_celsius if snap else None,
+            sampled_at=snap.sampled_at if snap else None,
+            history=list(state.temperature_history),
         )
 
     @app.get("/api/cameras", response_model=list[CameraResponse])

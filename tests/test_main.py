@@ -9,6 +9,7 @@ all without hardware or network.
 from __future__ import annotations
 
 import os
+import sys
 from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -214,6 +215,10 @@ class TestExitCodes:
             code = await app.run()
         assert code == EXIT_CONFIG
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="platform.board shim not cold-importable on Windows; runs on Linux/Docker",
+    )
     async def test_camera_error_returns_two(self, tmp_path: Path) -> None:
         from platform.board import Board
 

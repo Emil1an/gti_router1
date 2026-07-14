@@ -300,6 +300,10 @@ class HealthConfig(BaseModel):
     # Monitor (3.3)
     monitor_interval_s: Annotated[int, Field(ge=1, le=60)] = 5
 
+    # Temperature history recorder (rolling in-memory, Zero-Disk-Write)
+    temperature_sample_interval_s: Annotated[int, Field(ge=1, le=3600)] = 60
+    temperature_history_max: Annotated[int, Field(ge=1, le=100_000)] = 1440
+
     # Alert thresholds (3.3) — percentages and °C
     cpu_alert_threshold: Annotated[float, Field(ge=0, le=100)] = 80.0
     memory_alert_threshold: Annotated[float, Field(ge=0, le=100)] = 80.0

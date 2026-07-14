@@ -18,6 +18,7 @@ This is plain shared state — no business logic lives here.
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass, field
 
 
@@ -72,6 +73,12 @@ class AppState:
 
     # ── GPS (Epic 6 — last known coordinate, jsonb) ──────────────────────────────
     gps: dict[str, object] | None = None
+
+    # ── Temperature history (rolling, in-memory only — Zero-Disk-Write) ──────────
+    # Each entry: {"celsius": <float|None>, "at": <iso8601 str>}. Fixed maxlen so
+    # the deque self-evicts FIFO. maxlen must be set at creation; the recorder
+    # rebuilds it from config on start if a non-default cap is configured.
+    temperature_history: deque = field(default_factory=lambda: deque(maxlen=1440))
 
     # ── Per-camera status ────────────────────────────────────────────────────────
     per_camera: dict[str, CameraState] = field(default_factory=dict)

@@ -34,8 +34,8 @@ RUN mkdir -p /app/data /app/logs /var/lib/gti-router
 ENV PYTHONPATH=src
 ENV ROUTER_CONFIG=/app/config/router.yaml
 
-# 8. Exponer el puerto de la Mini-API local
-EXPOSE 8000
+# 8. Exponer el puerto de la Mini-API local (coincide con console.port)
+EXPOSE 8770
 
 # 9. Comando exacto de arranque
 CMD ["python", "-m", "main"]

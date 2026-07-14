@@ -47,6 +47,7 @@ from health.registration import DeviceRegistration
 from health.reporter import HealthReporter
 from health.state import AppState
 from health.supabase_client import SupabaseClient
+from health.temperature_recorder import TemperatureRecorder
 from health.watchdog import Watchdog
 from licensing import enforce_camera_limit
 from location.gps import GpsReader
@@ -84,6 +85,7 @@ class RouterApp:
         self._supabase_client: SupabaseClient | None = None
         self._registration: DeviceRegistration | None = None
         self._monitor: SystemMonitor | None = None
+        self._temperature: TemperatureRecorder | None = None
         self._board = None
         self._upload_service: UploadService | None = None
         self._reporter: HealthReporter | None = None
@@ -119,6 +121,19 @@ class RouterApp:
         # 6. System monitor (3.3)
         self._monitor = SystemMonitor()
         await self._monitor.start()
+
+        # 6a. Temperature history recorder (rolling in-memory, best-effort).
+        #     Consumes the monitor snapshot; a failure here never aborts startup.
+        self._temperature = TemperatureRecorder(
+            monitor=self._monitor,
+            state=self._state,
+            interval_s=self._cfg.health.temperature_sample_interval_s,
+            history_max=self._cfg.health.temperature_history_max,
+        )
+        try:
+            await self._temperature.start()
+        except Exception as exc:  # noqa: BLE001 — non-essential subsystem
+            self._logger.error("Temperature recorder failed to start (contained): %s", exc)
 
         # 6b. Local console mini-API (Epic 11) — loopback, best-effort.
         #     Reads AppState + SystemMonitor live; a failure here never aborts
@@ -237,6 +252,13 @@ class RouterApp:
         # 4. Stop the upload subsystem (drain in-flight uploads, persist SQLite)
         if self._upload_service is not None:
             await self._upload_service.stop(drain_timeout_s=timeout)
+
+        # 4b. Stop the temperature recorder (before the monitor it reads from)
+        if self._temperature is not None:
+            try:
+                await self._temperature.stop()
+            except Exception as exc:  # noqa: BLE001 — contained
+                self._logger.error("Error stopping temperature recorder: %s", exc)
 
         # 5. Stop the system monitor
         if self._monitor is not None:
